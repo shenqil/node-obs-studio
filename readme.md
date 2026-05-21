@@ -7,7 +7,7 @@ tar -czvf ../obs-studio-node-darwin-arm64.tar.gz ./*
 ```
 + darwin-x64
 ```
-zip -ry ../obs-studio-node-darwin-x64.zip . -x "*/.DS_Store" "./package.json"
+tar -czvf ../obs-studio-node-darwin-x64.tar.gz ./*
 ```
 + win32-x64
 ```
