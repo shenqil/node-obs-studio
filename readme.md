@@ -11,8 +11,9 @@ zip -ry ../obs-studio-node-darwin-x64.zip . -x "*/.DS_Store" "./package.json"
 ```
 + win32-x64
 ```
-powershell -Command "Get-ChildItem -Path * -Recurse | Where-Object { $_.Name -ne 'package.json' } | Compress-Archive -DestinationPath ../obs-studio-node-win32-x64.zip -Force"
+zip -ry ../obs-studio-node-win32-x64.zip . -x "./package.json"
 ```
++ 使用Linux子系统
 
 # 发布
 ```
