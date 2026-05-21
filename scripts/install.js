@@ -3,72 +3,108 @@ const path = require('path');
 const { execSync } = require('child_process');
 
 async function downloadAndUnzip() {
-  const platform = process.platform; // win32, darwin
+  const platform = process.platform; // win32, darwin, linux
   const arch = process.arch;         // x64, arm64
   
-  // 1. 定位并读取当前的 package.json
-  const targetDir = path.join(__dirname, '../'); // 当前包的根目录
+  // 1. Resolve paths
+  const targetDir = path.join(__dirname, '../'); 
   const currentPkgJsonPath = path.join(targetDir, 'package.json');
   
   if (!fs.existsSync(currentPkgJsonPath)) {
-    console.error('❌ 错误：未找到本地 package.json，无法获取当前版本号。');
+    console.error('❌ [Error] Local package.json not found. Aborting.');
     process.exit(1);
   }
 
-  // 2. 动态解析版本号
+  // 2. Parse version from local host config
   const pkg = JSON.parse(fs.readFileSync(currentPkgJsonPath, 'utf8'));
-  const version = pkg.version; // 例如拿到 "1.0.1"
+  const rawVersion = pkg.version; // 比如：'1.0.1' 或 '1.1.1'
   
-  if (!version) {
-    console.error('❌ 错误：本地 package.json 中未配置 version 字段。');
+  if (!rawVersion) {
+    console.error('❌ [Error] "version" field is missing in package.json.');
     process.exit(1);
   }
 
-  // 3. 动态拼接基于当前版本的 GitHub Release 下载直链
+  // 💡 核心修复：使用正则将最后一位 Patch 版本号强行归零
+  // 比如：1.0.1 -> 1.0.0 | 1.1.5 -> 1.1.0
+  const version = rawVersion.replace(/^(\d+\.\d+\.)\d+$/, '$10');
+
+  // Fast cache checker. Skip download if binary already exists
+  const binaryCheckPath = path.join(targetDir, 'obs_studio_client.node');
+  if (fs.existsSync(binaryCheckPath)) {
+    console.log(`✨ [OBS] Binary asset detected at ${binaryCheckPath}`);
+    console.log(`🚀 [OBS] Fresh cache found for v${version}. Skipping network download!`);
+    process.exit(0);
+  }
+
+  // 3. Define remote assets urls using the formatted version
+  // 此时请求的 tag 统一变成了：v1.0.0 或 v1.1.0
   const BASE_URL = `https://github.com/shenqil/node-obs-studio/releases/download/v${version}`;
-  const PROXY_URL = ''; // 國內機器可在此配置加速代理前綴，如 'https://ghproxy.com/'
-  
-  const filename = `obs-node-${platform}-${arch}.zip`;
-  const downloadUrl = `${PROXY_URL}${BASE_URL}/${filename}`;
+  const filename = `obs-studio-node-${platform}-${arch}.zip`; 
+  const downloadUrl = `${BASE_URL}/${filename}`;
   const tempZipPath = path.join(targetDir, filename);
 
-  console.log(`🔍 [OBS 部署] 当前环境: ${platform}-${arch}`);
-  console.log(`🏷️  [解析版本] 成功获取本地版本号: v${version}`);
-  console.log(`🚚 正在从 GitHub 下载专属 ZIP 包: ${downloadUrl}`);
+  console.log(`💻 [OBS] Environment detected: ${platform}-${arch}`);
+  console.log(`📦 [OBS] Npm Package Version: ${rawVersion}`);
+  console.log(`🏷️  [OBS] Target Binary Release: v${version}`); // 会提示用户正在获取 1.0.0 或 1.1.0
+  console.log(`🚚 [OBS] Fetching remote binary package from GitHub...`);
 
   try {
-    // 4. 发起网络请求下载 ZIP 文件
+    // 4. High-fidelity progressive download with dynamic logs
     const response = await fetch(downloadUrl);
     if (!response.ok) {
-      throw new Error(`GitHub 资源请求失败! 状态码: ${response.status}。请确保 Release v${version} 下存在文件: ${filename}`);
+      throw new Error(`HTTP Error! Status: ${response.status}. Please verify Release v${version} contains ${filename}`);
     }
     
-    const arrayBuffer = await response.arrayBuffer();
-    fs.writeFileSync(tempZipPath, Buffer.from(arrayBuffer));
-    console.log(`⬇️  ZIP 临时包下载完成，正在解压...`);
-
-    // 5. 调用系统命令平铺解压，并利用底层参数直接剔除、不解压包内的 package.json
-    console.log(`📦 正在平铺解压文件，自动跳过网络包内的 package.json...`);
+    const totalBytes = parseInt(response.headers.get('content-length') || '0', 10);
+    const reader = response.body.getReader();
+    const writer = fs.createWriteStream(tempZipPath);
     
+    let receivedBytes = 0;
+    const progressBarLength = 30;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      writer.write(value);
+      receivedBytes += value.length;
+
+      if (totalBytes > 0) {
+        const percentage = (receivedBytes / totalBytes) * 100;
+        const filledLength = Math.round((progressBarLength * receivedBytes) / totalBytes);
+        const bar = '█'.repeat(filledLength) + '░'.repeat(progressBarLength - filledLength);
+        
+        const mbReceived = (receivedBytes / (1024 * 1024)).toFixed(2);
+        const mbTotal = (totalBytes / (1024 * 1024)).toFixed(2);
+
+        process.stdout.write(`📥 [OBS] Downloading: [${bar}] ${percentage.toFixed(1)}% (${mbReceived}/${mbTotal} MB)\r`);
+      } else {
+        const mbReceived = (receivedBytes / (1024 * 1024)).toFixed(2);
+        process.stdout.write(`📥 [OBS] Downloading: ${mbReceived} MB received...\r`);
+      }
+    }
+    writer.end();
+    process.stdout.write('\n'); 
+    console.log(`⏳ [OBS] Download completed. Extracting flat assets...`);
+
+    // 5. Native direct extraction without structural layers
     if (platform === 'darwin') {
-      // macOS 使用 unzip，-x 排除 package.json
       execSync(`unzip -qo "${tempZipPath}" -d "${targetDir}" -x "package.json"`);
     } else if (platform === 'win32') {
-      // Windows 使用内置 tar，--exclude 排除 package.json
       execSync(`tar -xf "${tempZipPath}" -C "${targetDir}" --exclude="package.json"`);
     } else {
-      throw new Error(`暂不支持的操作系统: ${platform}`);
+      throw new Error(`Unsupported operating system configuration: ${platform}`);
     }
 
-    // 6. 清理临时下载的 zip 文件
+    // 6. Clean up temporary zip asset
     if (fs.existsSync(tempZipPath)) {
       fs.unlinkSync(tempZipPath);
     }
 
-    console.log(`🎉 [成功] 版本 v${version} 的专属文件已完美部署，本地 package.json 未受任何污染！`);
+    console.log(`🎉 [OBS] SUCCESS! Core binaries v${version} integrated seamlessly.`);
 
   } catch (err) {
-    console.error('❌ [失败] 自动部署原生模块时发生严重错误:', err);
+    console.error('\n❌ [OBS] CRITICAL EXCEPTION ENCOUNTERED:', err.message || err);
     if (fs.existsSync(tempZipPath)) fs.unlinkSync(tempZipPath);
     process.exit(1);
   }
