@@ -3,7 +3,7 @@
 # 压缩命令
 + darwin-ram64
 ```
-zip -ry ../obs-studio-node-darwin-arm64.zip . -x "*/.DS_Store" "./package.json"
+tar -czvf ../obs-studio-node-darwin-arm64.tar.gz ./*
 ```
 + darwin-x64
 ```

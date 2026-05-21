@@ -1,113 +1,183 @@
-const fs = require('fs');
+'use strict';
+
+const fs   = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { spawnSync } = require('child_process');
 
-async function downloadAndUnzip() {
-  const platform = process.platform; // win32, darwin, linux
-  const arch = process.arch;         // x64, arm64
-  
-  // 1. Resolve paths
-  const targetDir = path.join(__dirname, '../'); 
-  const currentPkgJsonPath = path.join(targetDir, 'package.json');
-  
-  if (!fs.existsSync(currentPkgJsonPath)) {
-    console.error('❌ [Error] Local package.json not found. Aborting.');
-    process.exit(1);
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+const BINARY_NAME   = 'obs_studio_client.node';
+const BASE_GH_URL   = 'https://github.com/shenqil/node-obs-studio/releases/download';
+const PROGRESS_COLS = 30;
+const FETCH_TIMEOUT_MS = 180_000;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Normalise a semver string so the patch segment is always 0 (e.g. 1.1.5 → 1.1.0). */
+function normaliseVersion(raw) {
+  const match = raw.match(/^(\d+\.\d+\.)\d+(.*)$/);
+  if (!match) throw new Error(`Invalid version string: "${raw}"`);
+  return `${match[1]}0${match[2]}`;
+}
+
+/** Return a pretty progress bar string. */
+function progressBar(received, total) {
+  if (total <= 0) {
+    return `${(received / 1_048_576).toFixed(2)} MB received`;
   }
+  const pct    = received / total;
+  const filled = Math.round(PROGRESS_COLS * pct);
+  const bar    = '█'.repeat(filled) + '░'.repeat(PROGRESS_COLS - filled);
+  const recMB  = (received / 1_048_576).toFixed(2);
+  const totMB  = (total    / 1_048_576).toFixed(2);
+  return `[${bar}] ${(pct * 100).toFixed(1)}% (${recMB}/${totMB} MB)`;
+}
 
-  // 2. Parse version from local host config
-  const pkg = JSON.parse(fs.readFileSync(currentPkgJsonPath, 'utf8'));
-  const rawVersion = pkg.version; // 比如：'1.0.1' 或 '1.1.1'
-  
-  if (!rawVersion) {
-    console.error('❌ [Error] "version" field is missing in package.json.');
-    process.exit(1);
-  }
-
-  // 💡 核心修复：使用正则将最后一位 Patch 版本号强行归零
-  // 比如：1.0.1 -> 1.0.0 | 1.1.5 -> 1.1.0
-  const version = rawVersion.replace(/^(\d+\.\d+\.)\d+$/, '$10');
-
-  // Fast cache checker. Skip download if binary already exists
-  const binaryCheckPath = path.join(targetDir, 'obs_studio_client.node');
-  if (fs.existsSync(binaryCheckPath)) {
-    console.log(`✨ [OBS] Binary asset detected at ${binaryCheckPath}`);
-    console.log(`🚀 [OBS] Fresh cache found for v${version}. Skipping network download!`);
-    process.exit(0);
-  }
-
-  // 3. Define remote assets urls using the formatted version
-  // 此时请求的 tag 统一变成了：v1.0.0 或 v1.1.0
-  const BASE_URL = `https://github.com/shenqil/node-obs-studio/releases/download/v${version}`;
-  const filename = `obs-studio-node-${platform}-${arch}.zip`; 
-  const downloadUrl = `${BASE_URL}/${filename}`;
-  const tempZipPath = path.join(targetDir, filename);
-
-  console.log(`💻 [OBS] Environment detected: ${platform}-${arch}`);
-  console.log(`📦 [OBS] Npm Package Version: ${rawVersion}`);
-  console.log(`🏷️  [OBS] Target Binary Release: v${version}`); // 会提示用户正在获取 1.0.0 或 1.1.0
-  console.log(`🚚 [OBS] Fetching remote binary package from GitHub...`);
+/** Write a file by consuming a WHATWG ReadableStream, with progress logging. */
+async function streamToFile(readableStream, destPath, contentLength) {
+  const writer = fs.createWriteStream(destPath);
+  const reader = readableStream.getReader();
+  let received = 0;
 
   try {
-    // 4. High-fidelity progressive download with dynamic logs
-    const response = await fetch(downloadUrl);
-    if (!response.ok) {
-      throw new Error(`HTTP Error! Status: ${response.status}. Please verify Release v${version} contains ${filename}`);
-    }
-    
-    const totalBytes = parseInt(response.headers.get('content-length') || '0', 10);
-    const reader = response.body.getReader();
-    const writer = fs.createWriteStream(tempZipPath);
-    
-    let receivedBytes = 0;
-    const progressBarLength = 30;
-
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
       writer.write(value);
-      receivedBytes += value.length;
-
-      if (totalBytes > 0) {
-        const percentage = (receivedBytes / totalBytes) * 100;
-        const filledLength = Math.round((progressBarLength * receivedBytes) / totalBytes);
-        const bar = '█'.repeat(filledLength) + '░'.repeat(progressBarLength - filledLength);
-        
-        const mbReceived = (receivedBytes / (1024 * 1024)).toFixed(2);
-        const mbTotal = (totalBytes / (1024 * 1024)).toFixed(2);
-
-        process.stdout.write(`📥 [OBS] Downloading: [${bar}] ${percentage.toFixed(1)}% (${mbReceived}/${mbTotal} MB)\r`);
-      } else {
-        const mbReceived = (receivedBytes / (1024 * 1024)).toFixed(2);
-        process.stdout.write(`📥 [OBS] Downloading: ${mbReceived} MB received...\r`);
-      }
+      received += value.length;
+      process.stdout.write(`\r📥 [OBS] Downloading: ${progressBar(received, contentLength)}`);
     }
+  } finally {
+    reader.releaseLock();
+  }
+
+  // Wait for the write stream to fully flush before returning.
+  await new Promise((resolve, reject) => {
     writer.end();
-    process.stdout.write('\n'); 
-    console.log(`⏳ [OBS] Download completed. Extracting flat assets...`);
+    writer.on('finish', resolve);
+    writer.on('error', reject);
+  });
 
-    // 5. Native direct extraction without structural layers
-    if (platform === 'darwin') {
-      execSync(`unzip -qo "${tempZipPath}" -d "${targetDir}" -x "package.json"`);
-    } else if (platform === 'win32') {
-      execSync(`tar -xf "${tempZipPath}" -C "${targetDir}" --exclude="package.json"`);
-    } else {
-      throw new Error(`Unsupported operating system configuration: ${platform}`);
+  process.stdout.write('\n');
+}
+
+/** Extract a .tar.gz archive, skipping package.json, using the system tar. */
+function extractTarGz(archivePath, destDir) {
+  const args = [
+    '-xzf', archivePath,
+    '-C',   destDir,
+    '--exclude=package.json',
+  ];
+
+  const result = spawnSync('tar', args, { stdio: 'inherit' });
+
+  if (result.error) {
+    throw new Error(`Failed to spawn tar: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`tar exited with code ${result.status}`);
+  }
+}
+
+/** Remove a file if it exists, silently. */
+function cleanUp(filePath) {
+  try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+async function main() {
+  const platform = process.platform; // darwin | win32 | linux
+  const arch     = process.arch;     // x64 | arm64
+
+  // 1. Locate and parse the host package.json
+  const targetDir        = path.resolve(__dirname, '..');
+  const pkgJsonPath      = path.join(targetDir, 'package.json');
+
+  if (!fs.existsSync(pkgJsonPath)) {
+    console.error('❌ [OBS] package.json not found at', pkgJsonPath);
+    process.exit(1);
+  }
+
+  const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf8'));
+
+  if (!pkg.version) {
+    console.error('❌ [OBS] "version" field is missing in package.json.');
+    process.exit(1);
+  }
+
+  const rawVersion = pkg.version;
+  const version    = normaliseVersion(rawVersion); // patch → 0
+
+  // 2. Fast-path: skip download if binary is already present
+  const binaryPath = path.join(targetDir, BINARY_NAME);
+  if (fs.existsSync(binaryPath)) {
+    console.log(`✨ [OBS] Binary found at ${binaryPath}`);
+    console.log(`🚀 [OBS] Cache hit for v${version}. Skipping download.`);
+    return;
+  }
+
+  // 3. Validate platform support
+  const SUPPORTED_PLATFORMS = ['darwin', 'win32', 'linux'];
+  if (!SUPPORTED_PLATFORMS.includes(platform)) {
+    console.error(`❌ [OBS] Unsupported platform: "${platform}"`);
+    process.exit(1);
+  }
+
+  // 4. Build remote URL
+  const filename    = `obs-studio-node-${platform}-${arch}.tar.gz`;
+  const downloadUrl = `${BASE_GH_URL}/v${version}/${filename}`;
+  const tempPath    = path.join(targetDir, filename);
+
+  console.log(`💻 [OBS] Platform  : ${platform}-${arch}`);
+  console.log(`📦 [OBS] Package   : v${rawVersion} → release v${version}`);
+  console.log(`🚚 [OBS] Fetching  : ${downloadUrl}`);
+
+  try {
+    // 5. Fetch with timeout
+    const controller = new AbortController();
+    const timer      = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+    let response;
+    try {
+      response = await fetch(downloadUrl, { signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
     }
 
-    // 6. Clean up temporary zip asset
-    if (fs.existsSync(tempZipPath)) {
-      fs.unlinkSync(tempZipPath);
+    if (!response.ok) {
+      throw new Error(
+        `HTTP ${response.status} — verify that release v${version} contains "${filename}".`
+      );
     }
 
-    console.log(`🎉 [OBS] SUCCESS! Core binaries v${version} integrated seamlessly.`);
+    const contentLength = parseInt(response.headers.get('content-length') ?? '0', 10);
+
+    // 6. Stream to disk (awaits full flush before proceeding)
+    await streamToFile(response.body, tempPath, contentLength);
+    console.log('⏳ [OBS] Download complete. Extracting…');
+
+    console.log('⏳ [OBS] Download complete. Waiting before extraction…');
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    console.log('📂 [OBS] Extracting…');
+
+    // 7. Extract (spawnSync avoids shell injection)
+    extractTarGz(tempPath, targetDir);
+
+    // 8. Cleanup
+    cleanUp(tempPath);
+
+    console.log(`🎉 [OBS] Success! Binaries v${version} are ready.`);
 
   } catch (err) {
-    console.error('\n❌ [OBS] CRITICAL EXCEPTION ENCOUNTERED:', err.message || err);
-    if (fs.existsSync(tempZipPath)) fs.unlinkSync(tempZipPath);
+    cleanUp(tempPath);
+    console.error('\n❌ [OBS] Fatal error:', err.message ?? err);
     process.exit(1);
   }
 }
 
-downloadAndUnzip();
+main();
