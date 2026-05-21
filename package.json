@@ -1,7 +1,12 @@
 {
   "name": "@shen9401/obs-studio-node",
   "version": "1.0.0",
-  "main": "index.js",
+  "license": "GPL-2.0",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "install": "node scripts/install.js"
   }
