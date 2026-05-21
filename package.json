@@ -1,6 +1,6 @@
 {
   "name": "@shen9401/obs-studio-node",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "license": "GPL-2.0",
   "main": "./index.js",
   "types": "./index.d.ts",
