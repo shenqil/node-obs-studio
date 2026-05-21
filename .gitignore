@@ -1,0 +1,4 @@
+node_modules/
+# 忽略解压出来的包内容
+bin/
+*.tar.gz
